@@ -219,12 +219,7 @@ class TowerVisionLoader(LlavaNextHfLoader):
     def get_processor(self, model_dir: str, config: PretrainedConfig) -> Processor:
         from transformers import LlavaNextProcessor
         # TODO -> max length should be set in the config and removed in the future
-        processor = LlavaNextProcessor.from_pretrained(
-            model_dir,
-            trust_remote_code=True,
-            #max_length=7000,
-            #truncation=True
-        )
+        processor = LlavaNextProcessor.from_pretrained(model_dir, trust_remote_code=True)
         processor.tokenizer.padding_side = 'right'
         return processor
 

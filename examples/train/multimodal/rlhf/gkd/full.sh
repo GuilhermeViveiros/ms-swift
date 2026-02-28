@@ -24,18 +24,18 @@ datasets=(
     # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/gemini-textvqa-filtered.json'
     # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/okvqa.json'
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/plotqa.jsonl'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-ai2d.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-scienceqa.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-stratos-17k.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/st_vqa.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/tabmwp.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/tally_qa.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-ask-model-anything.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-cap.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-cap-qa.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-count.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-docs.json'
-    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/vqav2.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-ai2d.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-scienceqa.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-stratos-17k.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/st_vqa.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/tabmwp.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/tally_qa.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-ask-model-anything.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-cap.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-cap-qa.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-count.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-docs.json'
+    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/vqav2.json'
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/euroblocks-sft-0525-text-only.jsonl'
     # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-cap-translated.json'
     # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pangea-cultural-150k.json'
@@ -75,9 +75,9 @@ ROOT_IMAGE_DIR=/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets
 HF_DATASETS_OFFLINE=1 \
 TRANSFORMERS_OFFLINE=1 \
 PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' \
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
 MASTER_PORT=29501 \
-NPROC_PER_NODE=1 \
+NPROC_PER_NODE=4 \
 swift rlhf \
     --rlhf_type gkd \
     --model /e/scratch/jureap126/gviveiros/hf_models/TowerVision-2B \
@@ -89,6 +89,7 @@ swift rlhf \
     --tuner_type full \
     --freeze_vit false \
     --freeze_llm false \
+    --vit_lr 2e-6
     --freeze_aligner false \
     --use_hf true \
     --seq_kd false \
@@ -102,12 +103,13 @@ swift rlhf \
     --attn_impl flash_attn \
     --torch_dtype bfloat16 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 1 \
+    --per_device_train_batch_size 6 \
     --per_device_eval_batch_size 1 \
+    --global_batch_size 128 \
     --learning_rate 1e-5 \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps 6 \
     --eval_steps 50 \
-    --save_steps 100 \
+    --save_steps 0.1 \
     --save_total_limit 2 \
     --gradient_checkpointing true \
     --logging_steps 2 \
@@ -118,6 +120,6 @@ swift rlhf \
     --dataloader_num_workers 4 \
     --dataset_num_proc 2 \
     --save_only_model true \
-    --deepspeed zero2 \
+    #--deepspeed zero2 \
     #--padding_free true
     #--max_length 7000 \

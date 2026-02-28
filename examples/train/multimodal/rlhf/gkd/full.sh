@@ -24,18 +24,18 @@ datasets=(
     # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/gemini-textvqa-filtered.json'
     # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/okvqa.json'
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/plotqa.jsonl'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-ai2d.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-scienceqa.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-stratos-17k.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/st_vqa.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/tabmwp.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/tally_qa.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-ask-model-anything.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-cap.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-cap-qa.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-count.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-docs.json'
-    '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/vqav2.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-ai2d.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-scienceqa.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/r1-vision-stratos-17k.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/st_vqa.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/tabmwp.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/tally_qa.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-ask-model-anything.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-cap.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/VisionBlocks-pixmo-cap-qa.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-count.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-docs.json'
+    # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/vqav2.json'
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/euroblocks-sft-0525-text-only.jsonl'
     # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pixmo-cap-translated.json'
     # '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/pangea-cultural-150k.json'
@@ -71,6 +71,22 @@ export HF_DATASETS_OFFLINE=1
 # OOM: teacher_deepspeed zero3 shards 9B teacher across GPUs. If still OOM: NPROC_PER_NODE=1 or zero3_offload.
 # but in vllm colate for some reason I have a bug when I use lash attebntion in the genration process... with the vllm server it does not happen
 #LOG_LEVEL=ERROR \
+
+PER_DEVICE_TRAIN_BATCH_SIZE=6
+GRADIENT_ACCUMULATION_STEPS=6
+NNODES=$SLURM_JOB_NUM_NODES
+NPROC_PER_NODE=4
+GLOBAL_BATCH_SIZE=$((PER_DEVICE_TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * NPROC_PER_NODE * NNODES))
+echo "PER_DEVICE_TRAIN_BATCH_SIZE: ${PER_DEVICE_TRAIN_BATCH_SIZE}"
+echo "GRADIENT_ACCUMULATION_STEPS: ${GRADIENT_ACCUMULATION_STEPS}"
+echo "NNODES: ${NNODES}"
+echo "NPROC_PER_NODE: ${NPROC_PER_NODE}"
+echo "GLOBAL_BATCH_SIZE: ${GLOBAL_BATCH_SIZE}"
+
+
+
+
+
 ROOT_IMAGE_DIR=/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/images \
 HF_DATASETS_OFFLINE=1 \
 TRANSFORMERS_OFFLINE=1 \
@@ -105,7 +121,6 @@ swift rlhf \
     --num_train_epochs 1 \
     --per_device_train_batch_size 6 \
     --per_device_eval_batch_size 1 \
-    --global_batch_size 128 \
     --learning_rate 1e-5 \
     --gradient_accumulation_steps 6 \
     --eval_steps 50 \
@@ -120,6 +135,7 @@ swift rlhf \
     --dataloader_num_workers 4 \
     --dataset_num_proc 2 \
     --save_only_model true \
+    #--group_by_length true \
     #--deepspeed zero2 \
     #--padding_free true
     #--max_length 7000 \

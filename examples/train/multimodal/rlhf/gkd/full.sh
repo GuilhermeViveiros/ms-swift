@@ -89,7 +89,7 @@ swift rlhf \
     --tuner_type full \
     --freeze_vit false \
     --freeze_llm false \
-    --vit_lr 2e-6
+    --vit_lr 2e-6 \
     --freeze_aligner false \
     --use_hf true \
     --seq_kd false \

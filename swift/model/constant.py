@@ -190,6 +190,7 @@ class MLLMModelType:
     llava1_6_vicuna_hf = 'llava1_6_vicuna_hf'
     llava1_6_yi_hf = 'llava1_6_yi_hf'
     llama3_llava_next_hf = 'llama3_llava_next_hf'
+    llava_next_gemma2_hf = 'llava_next_gemma2_hf'
     llava_next_qwen_hf = 'llava_next_qwen_hf'
     llava_next_video_hf = 'llava_next_video_hf'
     llava_next_video_yi_hf = 'llava_next_video_yi_hf'

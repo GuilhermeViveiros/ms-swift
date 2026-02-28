@@ -155,6 +155,7 @@ class MLLMTemplateType:
     llava1_6_yi_hf = 'llava1_6_yi_hf'
     llama3_llava_next_hf = 'llama3_llava_next_hf'
     llava_next_qwen_hf = 'llava_next_qwen_hf'
+    llava_next_gemma2_hf = 'llava_next_gemma2_hf'  # TowerVision: SigLIP2 + Gemma2
     llava_onevision_hf = 'llava_onevision_hf'
     llava_next_video_hf = 'llava_next_video_hf'
 

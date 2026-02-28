@@ -15,7 +15,7 @@ from packaging import version
 from transformers import PreTrainedModel
 from trl import SFTTrainer as HFSFTTrainer
 from typing import Dict, Optional, Union
-
+from swift.utils.logger import rank0_print, rank_print
 from swift.template import TemplateInputs
 from swift.trainers import SwiftMixin, disable_gradient_checkpointing
 from swift.utils import (JsonlWriter, get_logger, is_swanlab_available, is_wandb_available, remove_response, to_device,

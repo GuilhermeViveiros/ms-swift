@@ -5,7 +5,12 @@ from dataclasses import dataclass, field
 from packaging import version
 from typing import Any, Dict, List, Literal, Optional
 
-from swift.utils import get_env_args
+from swift.utils import (
+    get_env_args,
+    is_deepspeed_enabled,
+    to_device,
+    to_float_dtype
+)
 from ..base import Template
 from ..constant import MLLMTemplateType
 from ..register import TemplateMeta, register_template
@@ -13,6 +18,7 @@ from ..template_inputs import StdTemplateInputs
 from ..utils import Context, Prompt, findall
 from ..vision_utils import load_video_llava
 from .llama import Llama3TemplateMeta
+from .gemma import GemmaTemplateMeta
 from .qwen import QwenTemplateMeta
 from .utils import ChatmlTemplateMeta
 
@@ -126,8 +132,8 @@ class Llava1_6HfTemplate(LlavaHfTemplate):
     def _data_collator(self, batch: List[Dict[str, Any]], *, padding_to: Optional[int] = None) -> Dict[str, Any]:
         for b in batch:
             pixel_values = b.get('pixel_values')
-            if pixel_values is not None:
-                b['pixel_values'] = pixel_values.squeeze(0)  # 5d -> 4d
+            # if pixel_values is not None:
+            #     b['pixel_values'] = pixel_values.squeeze(0)  # 5d -> 4d
         res = super()._data_collator(batch, padding_to=padding_to)
         return res
 
@@ -177,6 +183,203 @@ register_template(Llama3TemplateMeta(
 ))
 
 register_template(QwenTemplateMeta(MLLMTemplateType.llava_next_qwen_hf, template_cls=Llava1_6HfTemplate))
+
+
+class LlavaNextGemma2Template(Llava1_6HfTemplate):
+    """TowerVision template: LLaVA-NeXT (SigLIP2 + Gemma2) image-only.
+
+    Aligns with transformers LlavaNextProcessor: same chat format, image token expansion
+    via processor, and _post_encode for training (Gemma2 image_token_id may be >= vocab_size).
+    """
+
+    use_model = True
+    # vLLM expects raw images; passing pre-processed SigLIP 5D pixel_values causes
+    # "values outside [0,1]" because vLLM's processor re-processes them as raw images.
+    use_custom_encode_for_vllm = False
+    support_padding_free = True
+    norm_bbox = 'none'
+    placeholder_tokens = ['<image>']
+
+    @property
+    def image_token_index(self) -> int:
+        """Use processor.image_token_id for Gemma2 (may differ from tokenizer vocab)."""
+        if not hasattr(self, '_image_token_index'):
+            proc = self.processor
+            self._image_token_index = getattr(proc, 'image_token_id', None)
+            if self._image_token_index is None:
+                self._image_token_index = self.tokenizer.convert_tokens_to_ids(
+                    getattr(proc, 'image_token', '<image>')
+                )
+        return self._image_token_index
+
+    def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index: int,
+                    inputs: StdTemplateInputs) -> List[Context]:
+        assert media_type == 'image', 'TowerVision is image-only'
+        return ['<image>\n']
+
+    # def _encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
+    #     """LLaVA-NeXT image-only encoding. Use processor for token expansion to match HF exactly.
+
+    #     LlavaHfTemplate uses pixel_values[0].shape[-2:] for height/width, which is wrong for
+    #     SigLIP's 5D output. We use processor(text, images) to get correct input_ids and
+    #     pixel_values, ensuring alignment with transformers inference.
+    #     """
+    #     images = inputs.images
+    #     if not images:
+    #         return super()._encode(inputs)
+
+    #     # Build conversation for processor.apply_chat_template (matches HF format)
+    #     # Omit default system to match HF inference and reduce prompt length (fits 4096 ctx)
+    #     conversation = []
+    #     if inputs.system is not None and inputs.system != (self.template_meta.default_system or ''):
+    #         conversation.append({'role': 'system', 'content': inputs.system})
+    #     for msg in inputs.messages:
+    #         content = msg.get('content', '')
+    #         if isinstance(content, list):
+    #             parts = []
+    #             for c in content:
+    #                 if isinstance(c, dict):
+    #                     if c.get('type') == 'image':
+    #                         parts.append('<image>\n')
+    #                     else:
+    #                         parts.append(c.get('text', str(c)))
+    #                 else:
+    #                     parts.append(str(c))
+    #             content = ''.join(parts)
+    #         conversation.append({'role': msg['role'], 'content': content})
+
+    #     # Add generation prompt for inference; for training the last message is assistant
+    #     add_gen = not (conversation and conversation[-1]['role'] == 'assistant')
+    #     prompt = self.processor.apply_chat_template(
+    #         conversation, add_generation_prompt=add_gen, tokenize=False
+    #     )
+    #     if isinstance(prompt, list):
+    #         prompt = prompt[0]
+
+    #     # Use processor for correct token expansion (matches HF inference)
+    #     # import pdb; pdb.set_trace()
+    #     # create PIL image 2000x2000
+    #     # from PIL import Image
+    #     # image = Image.new('RGB', (2000, 2000), color='red')
+    #     proc_out = self.processor(text=prompt, images=images, return_tensors='pt')
+    #     input_ids = proc_out['input_ids']
+    #     if isinstance(input_ids, torch.Tensor):
+    #         input_ids = input_ids.tolist()
+    #     if input_ids and isinstance(input_ids[0], list):
+    #         input_ids = input_ids[0]
+
+    #     pv = proc_out['pixel_values']
+    #     encoded = {
+    #         'input_ids': input_ids,
+    #         'pixel_values': pv,
+    #         'labels': None,
+    #         'loss_scale': None,
+    #     }
+    #     if 'image_sizes' in proc_out:
+    #         encoded['image_sizes'] = proc_out['image_sizes']
+
+    #     # Build labels for training (mask prompt/image, predict response)
+    #     if self.is_training and not add_gen:
+    #         labels = [-100] * len(input_ids)
+    #         resp_marker = '<start_of_turn>model\n'
+    #         prefix_ids = self.tokenizer.encode(resp_marker, add_special_tokens=False)
+    #         for i in range(len(input_ids) - len(prefix_ids) + 1):
+    #             if input_ids[i:i + len(prefix_ids)] == prefix_ids:
+    #                 for j in range(i + len(prefix_ids), len(input_ids)):
+    #                     labels[j] = input_ids[j]
+    #                 break
+    #         encoded['labels'] = labels
+    #     return encoded
+
+    def _post_encode(self, model, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Pre-compute inputs_embeds with image features merged (Gemma2 image_token_id may be >= vocab_size)."""
+        #from transformers.integrations import is_deepspeed_zero3_enabled
+        
+
+        if not self.is_training:
+            return inputs
+
+        pixel_values = inputs.get('pixel_values')
+        image_sizes = inputs.get('image_sizes')
+        input_ids = inputs['input_ids']
+
+        if isinstance(input_ids, list):
+            input_ids = torch.tensor(input_ids, dtype=torch.long)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        base_model = self.get_base_model(model)
+        image_token_id = getattr(model.config, 'image_token_id', None) or getattr(
+            model.config, 'image_token_index', self.image_token_index
+        )
+        pad_id = getattr(model.config, 'pad_token_id', None) or 0
+
+        # Safe embedding lookup (image_token_id may be >= vocab_size for Gemma2)
+        safe_input_ids = input_ids.clone()
+        safe_input_ids[input_ids == image_token_id] = pad_id
+
+        if hasattr(base_model.model, 'embed_tokens'):
+            embed = base_model.model.embed_tokens
+        else:
+            embed = base_model.model.language_model.embed_tokens
+        inputs_embeds = embed(safe_input_ids)
+
+        if pixel_values is not None and pixel_values.numel() > 0:
+            pixel_values = to_device(pixel_values, input_ids.device)
+            pixel_values = to_float_dtype({'pixel_values': pixel_values}, base_model.dtype)['pixel_values']
+
+            image_outputs = base_model.model.get_image_features(
+                pixel_values,
+                image_sizes,
+                vision_feature_select_strategy=getattr(
+                    model.config, 'vision_feature_select_strategy', 'default'
+                ),
+            )
+            pooler_out = getattr(image_outputs, 'pooler_output', image_outputs)
+            if isinstance(pooler_out, (list, tuple)):
+                image_features = torch.cat(pooler_out, dim=0)
+            else:
+                image_features = pooler_out
+            image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+
+            n_image_tokens = (input_ids == image_token_id).sum().item()
+            n_features = image_features.shape[0]
+            if n_image_tokens != n_features:
+                raise ValueError(
+                    f'Image tokens ({n_image_tokens}) != image features ({n_features}). '
+                    f'Check _encode and processor._get_number_of_features.'
+                )
+            image_mask = (input_ids == image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_features)
+
+        else: #is_deepspeed_enabled() and not is_deepspeed_zero3_enabled():
+            # Dummy pass for mixed batches (some samples without images)
+            size_ = self.config.vision_config.image_size
+            dummy = input_ids.new_zeros(1, 3, size_, size_, dtype=base_model.dtype)
+            image_features = torch.zeros(1, 784, self.config.vision_config.hidden_size).to(inputs_embeds.device, inputs_embeds.dtype)
+
+        #     
+     
+
+        out = {k: v for k, v in inputs.items() if k not in ('pixel_values', 'image_sizes')}
+        out['inputs_embeds'] = inputs_embeds
+        out['input_ids'] = input_ids  # LlavaNext needs input_ids for placeholder mask
+        return out
+
+
+register_template(
+    TemplateMeta(
+        MLLMTemplateType.llava_next_gemma2_hf,
+        prefix=['<bos>'],
+        prompt=['<start_of_turn>user\n{{QUERY}}<end_of_turn>\n<start_of_turn>model\n'],
+        chat_sep=['<end_of_turn>\n'],
+        suffix=['<end_of_turn>'],
+        system_prefix=['<bos><start_of_turn>system\n{{SYSTEM}}<end_of_turn>\n'],
+        default_system='You are a helpful assistant.',
+        stop_words=['<|endoftext|>', '<end_of_turn>\n', '<end_of_turn>'],
+        agent_template='hermes',
+        template_cls=LlavaNextGemma2Template,
+    ))
 
 
 class LlavaOneVisionHfTemplate(Llava1_6HfTemplate):

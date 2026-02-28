@@ -154,3 +154,20 @@ def add_file_handler_if_needed(logger, log_file, file_mode, log_level):
         file_handler.setFormatter(logger_format)
         file_handler.setLevel(log_level)
         logger.addHandler(file_handler)
+
+def get_rank():
+    import torch
+    import torch.distributed as dist
+    if dist.is_available() and dist.is_initialized():
+        rank = dist.get_rank()
+    return rank
+
+
+def rank0_print(msg):
+    rank = get_rank()
+    if rank == 0:
+        logger.info(msg)
+
+def rank_print(msg):
+    rank = get_rank()
+    logger.info(f"[Rank {rank}] {msg}")

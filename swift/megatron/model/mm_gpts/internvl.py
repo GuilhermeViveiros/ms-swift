@@ -1,5 +1,6 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import torch
+from types import SimpleNamespace
 
 from swift.model import ModelType
 from ..constant import MegatronModelType
@@ -16,7 +17,18 @@ class Internvl3Bridge(GPTBridge):
     hf_score_key = 'language_model.score.weight'
 
     def _init_meta_hf_model(self):
-        internvl3_vit = Internvl3Vit(None)
+        config = SimpleNamespace()
+        config.args = SimpleNamespace(
+            model_dir=self.model_dir,
+            model_type=self.model_type,
+            torch_dtype=getattr(self.args, 'torch_dtype', torch.bfloat16),
+            attn_impl=getattr(self.args, 'attn_impl', None),
+        )
+        config.attention_backend = getattr(self.args, 'attention_backend', None)
+        if config.attention_backend is None:
+            from megatron.core.transformer.enums import AttnBackend
+            config.attention_backend = AttnBackend.flash
+        internvl3_vit = Internvl3Vit(config)
         self.hf_model = internvl3_vit._hf_model[0]
         self.hf_model.vision_model = None
         self.processor = internvl3_vit.processor

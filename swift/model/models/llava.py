@@ -202,6 +202,60 @@ register_model(
     ))
 
 
+
+class TowerVisionLoader(LlavaNextHfLoader):
+    """TowerVision (LlavaNext + SigLIP2 + Gemma2) loader.
+
+    Uses LlavaNextForConditionalGeneration with LlavaNextProcessor.
+    Sets tokenizer.padding_side='right' for Gemma2 chat format.
+    """
+    from swift.utils import Processor
+
+    def get_config(self, model_dir: str) -> PretrainedConfig:
+        from transformers import LlavaNextConfig
+        config = LlavaNextConfig.from_pretrained(model_dir, trust_remote_code=True)
+        return config
+
+    def get_processor(self, model_dir: str, config: PretrainedConfig) -> Processor:
+        from transformers import LlavaNextProcessor
+        # TODO -> max length should be set in the config and removed in the future
+        processor = LlavaNextProcessor.from_pretrained(
+            model_dir,
+            trust_remote_code=True,
+            #max_length=7000,
+            #truncation=True
+        )
+        processor.tokenizer.padding_side = 'right'
+        return processor
+
+    def get_model(self, model_dir: str, config: PretrainedConfig, processor: Processor,
+                  model_kwargs) -> PreTrainedModel:
+        from transformers import LlavaNextForConditionalGeneration
+        print('Running TowerVision...')
+        self.auto_model_cls = self.auto_model_cls or LlavaNextForConditionalGeneration
+        model = super().get_model(model_dir, config, processor, model_kwargs)
+        model.generation_config.cache_implementation = None
+        return model
+
+register_model(
+    ModelMeta(
+        MLLMModelType.llava_next_gemma2_hf,
+        [
+            ModelGroup([
+                Model('utter-project/TowerVision-2B', 'utter-project/TowerVision-2B'),
+                Model('utter-project/TowerVision-9B', 'utter-project/TowerVision-9B'),
+            ]),
+        ],
+        TowerVisionLoader,
+        template=TemplateType.llava_next_gemma2_hf,
+        is_multimodal=True,
+        model_arch=ModelArch.llava_hf,
+        architectures=['LlavaNextForConditionalGeneration'],
+        requires=['transformers>=4.50'],
+        tags=['vision'],
+    ))
+
+
 class LlavaNextYiHfLoader(LlavaNextHfLoader):
 
     def get_config(self, model_dir: str) -> PretrainedConfig:

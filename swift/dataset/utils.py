@@ -11,8 +11,49 @@ from typing import Any, Callable, Dict, Optional, Union
 from swift.template import Template
 from swift.utils import get_logger
 from .preprocessor import RowPreprocessor
+from .token_estimate import (
+    estimate_tokens_for_mllm_row,
+    ensure_vision_tokens_in_row
+)
 
 logger = get_logger()
+
+
+def filter_dataset_by_length(
+    dataset: HfDataset,
+    template: Template,
+    max_length: int,
+    *,
+    num_proc: int = 1,
+    desc: str = 'filter_by_length',
+    model_dir: Optional[str] = None,
+) -> HfDataset:
+    """
+    Filter dataset rows that exceed max_length (estimated via template.encode).
+
+    Useful for GKD/multimodal training to avoid collective shape mismatches from
+    oversized sequences.
+
+    Args:
+        dataset: HuggingFace Dataset.
+        template: Initialized template (processor inited).
+        max_length: Maximum sequence length.
+        num_proc: Number of processes for dataset.map.
+        desc: Progress bar description.
+        model_dir: Model path for TowerVision (e.g. utter-project/TowerVision-2B).
+            Used for lightweight image-token estimation when filtering.
+
+    Returns:
+        Filtered dataset.
+    """
+    from typing import List
+    def _keep_batch(batch: Dict[str, List[Any]]) -> List[bool]:
+        """Process a batch of rows; return list of bools."""
+        n = len(batch['messages']) if 'messages' in batch else len(next(iter(batch.values())))
+        rows = [{k: batch[k][i] for k in batch} for i in range(n)]
+        return [ensure_vision_tokens_in_row(r) and estimate_tokens_for_mllm_row(r, template, max_length, model_dir=model_dir) for r in rows]
+
+    return dataset.filter(lambda row: _keep_batch(row), batched=True, batch_size=456, num_proc=num_proc*10, desc=desc)
 
 
 def sample_dataset(

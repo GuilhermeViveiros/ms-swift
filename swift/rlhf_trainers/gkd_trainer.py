@@ -300,8 +300,9 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, HFGKDTrainer):
 
                 encoded = template.encode(data, return_length=True)
                 batch_encoded_inputs.append(encoded)
+            padding_to = self.template.max_length
 
-            batch_encoded = to_device(template.data_collator(batch_encoded_inputs), self.model.device)
+            batch_encoded = to_device(template.data_collator(batch_encoded_inputs, padding_to=padding_to), self.model.device)
 
         return batch_encoded
 

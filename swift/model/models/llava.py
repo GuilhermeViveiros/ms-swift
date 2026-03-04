@@ -202,7 +202,6 @@ register_model(
     ))
 
 
-
 class TowerVisionLoader(LlavaNextHfLoader):
     """TowerVision (LlavaNext + SigLIP2 + Gemma2) loader.
 

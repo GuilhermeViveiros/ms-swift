@@ -27,6 +27,8 @@ from .template_inputs import StdTemplateInputs, TemplateInputs
 from .utils import Context, ContextType, StopWordsCriteria, fetch_one, findall, get_last_user_round, split_str_parts_by
 from .vision_utils import load_audio, load_batch, load_image, rescale_image
 
+from swift.utils.logger import rank_print
+
 logger = get_logger()
 if TYPE_CHECKING:
     from swift.infer_engine import InferRequest
@@ -135,7 +137,7 @@ class Template(ProcessorMixin):
         self.add_non_thinking_prefix = add_non_thinking_prefix
         self.remove_unused_columns = remove_unused_columns
         self.template_backend = template_backend
-        self.max_length = max_length
+        #self.max_length = max_length
         self.truncation_strategy = truncation_strategy
         self.loss_scale: LossScale = get_loss_scale(loss_scale)
         self.max_pixels = max_pixels
@@ -518,7 +520,6 @@ class Template(ProcessorMixin):
         elif isinstance(inputs, TemplateInputs):
             inputs = deepcopy(inputs)
         assert isinstance(inputs, TemplateInputs)
-
         chosen = inputs.chosen
         if self.task_type == 'causal_lm':
             if self.mode in {'train', 'transformers', 'vllm', 'lmdeploy', 'sglang'}:
@@ -1290,6 +1291,8 @@ class Template(ProcessorMixin):
         labels = encoded.get('labels')
         loss_scale = encoded.get('loss_scale')
         length = self._get_length(input_ids, labels)
+
+        #self.max_length = 8192
         if self.max_length is not None and length > self.max_length:
             if self.truncation_strategy in {'right', 'left'}:
                 input_ids, labels, loss_scale = self._truncate(
@@ -1859,7 +1862,13 @@ class Template(ProcessorMixin):
         # multimodal
         res = {}
         pixel_values = [b['pixel_values'] for b in batch if b.get('pixel_values') is not None]
+    
         if len(pixel_values) > 0:
+            # if pixel_values is 5D, squeeze the batch dimension
+            if pixel_values[0].ndim == 5:
+                pixel_values = [p.squeeze(0) for p in pixel_values]
+            else:
+                pixel_values = [p for p in pixel_values]
             res['pixel_values'] = torch.concat(pixel_values)
 
             image_sizes = [b['image_sizes'] for b in batch if b.get('image_sizes') is not None]
@@ -2088,59 +2097,40 @@ class Template(ProcessorMixin):
             modeling_module._flash_attention_forward = _origin_flash_attention_forward
 
     @staticmethod
-    def _get_inputs_embeds_hf(inputs_embeds, inputs, visual, processor, config):
+    def _get_inputs_embeds_hf(inputs_embeds, inputs, model, processor, config):
         input_ids = inputs['input_ids']
         pixel_values = inputs.get('pixel_values')
+        image_sizes = inputs.get('image_sizes')
         pixel_values_videos = inputs.get('pixel_values_videos')
         image_grid_thw = inputs.get('image_grid_thw')
         video_grid_thw = inputs.get('video_grid_thw')
-        dtype = visual.dtype
+        dtype = model.dtype
+       
         if pixel_values is None and pixel_values_videos is None:  # plain-text
-            images = [Image.new('RGB', (32, 32), (0, 0, 0))]
-            media_inputs = processor.image_processor(images=images, return_tensors='pt')
-            media_inputs = to_device(media_inputs, input_ids.device)
-            pixel_values = media_inputs['pixel_values'].type(dtype)
-            image_embeds = visual(pixel_values, grid_thw=media_inputs['image_grid_thw'])
-            if hasattr(image_embeds, 'pooler_output'):
-                image_embeds = image_embeds.pooler_output
-            inputs_embeds = inputs_embeds + image_embeds.mean().to(device=inputs_embeds.device) * 0.
+            pixel_values = torch.zeros((1, 2, 3, 384, 384), dtype=dtype, device=inputs_embeds.device)
+            image_sizes = torch.tensor([[384, 384]], dtype=torch.long, device=inputs_embeds.device)
+            image_embeds = model.get_image_features(pixel_values, image_sizes, vision_feature_select_strategy=model.config.vision_feature_select_strategy)[0]
+            inputs_embeds = inputs_embeds + image_embeds.mean() * 1e-9
         else:
+            # LLava-Next default behavior
             if pixel_values is None:
-                pixel_values_mixed = pixel_values_videos
-                grid_thw = video_grid_thw
-            elif pixel_values_videos is None:
-                pixel_values_mixed = pixel_values
-                grid_thw = image_grid_thw
-            else:
-                pixel_values_mixed = torch.concat([pixel_values, pixel_values_videos], dim=0)
-                grid_thw = torch.concat([image_grid_thw, video_grid_thw], dim=0)
-            pixel_values_mixed = pixel_values_mixed.type(dtype)
-            mixed_embeds = visual(pixel_values_mixed, grid_thw=grid_thw)
-            if hasattr(mixed_embeds, 'pooler_output'):
-                mixed_embeds = mixed_embeds.pooler_output
-            if pixel_values is None:
-                image_embeds = None
-                video_embeds = mixed_embeds
-            elif pixel_values_videos is None:
-                image_embeds = mixed_embeds
-                video_embeds = None
-            else:
-                merge_length = processor.image_processor.merge_size**2
-                image_tokens = (image_grid_thw.prod(dim=-1) // merge_length).sum()
-                image_embeds = mixed_embeds[:image_tokens]
-                video_embeds = mixed_embeds[image_tokens:]
+                raise ValueError('pixel_values is None')
+            image_embeds = model.get_image_features(
+                pixel_values, image_sizes,
+                vision_feature_select_strategy=model.config.vision_feature_select_strategy
+            )
+            # get_image_features returns list of tensors (one per image); concat for batch > 1 / multi-image
+            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            image_mask = (input_ids == config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+            image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            image_mask = image_mask.to(inputs_embeds.device)
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-            if image_embeds is not None:
-                image_mask = (input_ids == config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-                image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-                image_mask = image_mask.to(inputs_embeds.device)
-                inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-
-            if video_embeds is not None:
-                video_mask = (input_ids == config.video_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-                video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-                video_mask = video_mask.to(inputs_embeds.device)
-                inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+            # if video_embeds is not None:
+            #     video_mask = (input_ids == config.video_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+            #     video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            #     video_mask = video_mask.to(inputs_embeds.device)
+            #     inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
         return inputs_embeds
 
     @staticmethod

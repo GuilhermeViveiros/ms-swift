@@ -206,19 +206,26 @@ def estimate_tokens_for_mllm_row(
     if proc is not None and (
         hasattr(proc, '_get_num_multimodal_tokens') or hasattr(proc, '_get_number_of_features')
     ):
-        image_sizes = _get_image_sizes_from_row(row)
-        img_tokens = 0
-        if len(image_sizes) > 0:
-            image_sizes = image_sizes[0]
-            # count 1 only, if > 1 it will be filtered out in later steps
-            img_tokens = proc._get_number_of_features(image_sizes[0], image_sizes[1], 384, 384)
-        tokenizer = getattr(template, 'tokenizer', None) or getattr(proc, 'tokenizer', None)
-        text_tokens = _estimate_text_tokens(row, tokenizer) if tokenizer else 0
-        # Add buffer for template overhead (prefix, suffix, chat format)
-        safe_buffer = 328
-        total = img_tokens + text_tokens + safe_buffer
+        try:
+            image_sizes = _get_image_sizes_from_row(row)
+            img_tokens = 0
+            if len(image_sizes) > 0:
+                image_sizes = image_sizes[0]
+                # count 1 only, if > 1 it will be filtered out in later steps
+                img_tokens = proc._get_number_of_features(image_sizes[0], image_sizes[1], 384, 384)
+                if img_tokens < 300:
+                    return False # filter out the sample with tiny image
+        except Exception as e:
+            logger.error(f'Error estimating image tokens: {e}')
+            return False # filter out the sample with error
+        return True
+    #     tokenizer = getattr(template, 'tokenizer', None) or getattr(proc, 'tokenizer', None)
+    #     text_tokens = _estimate_text_tokens(row, tokenizer) if tokenizer else 0
+    #     # Add buffer for template overhead (prefix, suffix, chat format)
+    #     #safe_buffer = 328
+    #     #total = img_tokens + text_tokens + safe_buffer
     else:
         raise ValueError('TowerVision processor is not loaded or is not compatible with the template.')
     #if total > max_length:
     #print(f"Total tokens: {total} > max_length: {max_length}")
-    return total <= max_length
+    #return total <= max_length

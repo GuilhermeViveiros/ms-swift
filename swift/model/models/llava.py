@@ -1,6 +1,10 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import sys
 from functools import wraps
+from types import MethodType
+
+import numpy as np
+import torch
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
@@ -116,7 +120,9 @@ class LlavaNextHfLoader(ModelLoader):
     def get_model(self, model_dir: str, *args, **kwargs) -> PreTrainedModel:
         from transformers import LlavaNextForConditionalGeneration
         self.auto_model_cls = self.auto_model_cls or LlavaNextForConditionalGeneration
-        return super().get_model(model_dir, *args, **kwargs)
+        model = super().get_model(model_dir, *args, **kwargs)
+        _patch_llava_next_zero3(model)
+        return model
 
 
 register_model(
@@ -200,6 +206,81 @@ register_model(
         requires=['transformers>=4.41'],
         tags=['vision'],
     ))
+
+
+def _patch_llava_next_zero3(model: PreTrainedModel) -> None:
+    """Patch LLaVA-Next to avoid ZeRO-3 sharding of image_newline parameter.
+
+    Replaces learned image_newline with constant tile index encoding in pack_image_features,
+    so the parameter is never used in forward. Fixes RuntimeError when image_newline is
+    sharded and becomes empty on some ranks.
+    """
+    inner = getattr(model, 'model', model)
+    if not hasattr(inner, 'pack_image_features') or not hasattr(inner, 'image_newline'):
+        return
+    if getattr(inner, '_swift_zero3_image_newline_patched', False):
+        return
+
+    from transformers.models.llava_next.modeling_llava_next import (
+        get_anyres_image_grid_shape,
+        unpad_image,
+    )
+
+    def _pack_image_features_zero3(
+        self,
+        image_features,
+        image_sizes,
+        vision_feature_select_strategy,
+        image_newline=None,
+    ):
+        # Always use constant tile encoding (ignore image_newline) to avoid ZeRO-3 sharding issues
+        new_image_features = []
+        feature_lens = []
+        for image_idx, image_feature in enumerate(image_features):
+            if image_feature.shape[0] > 1:
+                base_image_feature = image_feature[0]
+                image_feature = image_feature[1:]
+                height = width = self.config.vision_config.image_size // self.config.vision_config.patch_size
+                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+                    image_sizes[image_idx],
+                    self.config.image_grid_pinpoints,
+                    self.config.vision_config.image_size,
+                )
+                image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
+                image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                image_feature = unpad_image(image_feature, image_sizes[image_idx])
+
+                # Constant tile encoding: 1,2,3,... for tiles (same structure as image_newline)
+                device, dtype = image_feature.device, image_feature.dtype
+                embed_dim = image_feature.shape[0]
+                tile_indices = (
+                    torch.arange(
+                        1, num_patch_height * num_patch_width + 1, device=device, dtype=dtype
+                    )
+                    .view(num_patch_height, num_patch_width)
+                    .repeat_interleave(height, dim=0)
+                    .repeat_interleave(width, dim=1)
+                )
+                tile_indices = tile_indices.unsqueeze(0)
+                tile_indices = unpad_image(tile_indices, image_sizes[image_idx])
+                tile_col = torch.zeros(embed_dim, tile_indices.shape[1], 1, device=device, dtype=dtype)
+                tile_col[-1:, :, :] = tile_indices[:, :, -1:]
+                image_feature = torch.cat((image_feature, tile_col), dim=-1)
+
+                image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                image_feature = torch.cat((base_image_feature, image_feature), dim=0)
+            else:
+                image_feature = image_feature[0].unsqueeze(0)
+            new_image_features.append(image_feature)
+            feature_lens.append(image_feature.size(0))
+        feature_lens = torch.tensor(feature_lens, dtype=torch.long, device=image_features[0].device)
+        return new_image_features, feature_lens
+
+    # Replace pack_image_features so it always uses constant tile encoding (ignores image_newline).
+    # get_image_features passes self.image_newline; our patched pack ignores it, avoiding ZeRO-3.
+    inner.pack_image_features = MethodType(_pack_image_features_zero3, inner)
+    inner._swift_zero3_image_newline_patched = True
 
 
 class TowerVisionLoader(LlavaNextHfLoader):

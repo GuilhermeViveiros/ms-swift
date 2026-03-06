@@ -1168,60 +1168,6 @@ class SwiftMixin:
 
 class DataLoaderMixin:
 
-    def _get_modality_lengths(self, train_dataset):
-        """Compute modality-aware lengths for the training dataset.
-
-        Returns a list where positive values indicate multimodal (image/video)
-        samples and negative values indicate text-only samples. Returns None if
-        modality grouping is not applicable (non-multimodal model, DeepSpeed
-        disabled, or single-modality dataset).
-
-        This follows the LLaVA-Next approach: grouping by modality ensures all
-        ranks in a distributed step process the same modality, preventing
-        DeepSpeed gradient collective mismatches when some ranks have images
-        and others do not.
-        """
-        if not getattr(self, 'is_deepspeed_enabled', False):
-            return None
-        model_meta = getattr(self.model, 'model_meta', None)
-        if model_meta is None or not model_meta.is_multimodal:
-            return None
-        try:
-            images_col = train_dataset['images']
-        except (KeyError, TypeError, IndexError):
-            return None
-
-        def _has_images(img):
-            if img is None:
-                return False
-            if isinstance(img, (list, tuple)):
-                return len(img) > 0
-            return bool(img)
-
-        has_mm = any(_has_images(img) for img in images_col)
-        has_text = any(not _has_images(img) for img in images_col)
-        if not (has_mm and has_text):
-            return None
-
-        try:
-            lengths_col = train_dataset['lengths']
-        except (KeyError, TypeError):
-            lengths_col = [1] * len(images_col)
-
-        modality_lengths = []
-        for length, img in zip(lengths_col, images_col):
-            if isinstance(length, list):
-                length = max(length)
-            abs_len = max(abs(int(length)), 1)
-            modality_lengths.append(abs_len if _has_images(img) else -abs_len)
-
-        from swift.utils import get_logger
-        _logger = get_logger()
-        n_mm = sum(1 for l in modality_lengths if l > 0)
-        n_text = sum(1 for l in modality_lengths if l < 0)
-        _logger.info(f'Modality-grouped sampling enabled: {n_mm} multimodal, {n_text} text-only samples')
-        return modality_lengths
-
     def get_sp_dataloader(self, dataset, batch_size, skip_batches=0):
 
         data_collator = self.data_collator
@@ -1298,10 +1244,6 @@ class DataLoaderMixin:
                 if args.group_by_length:
                     batch_sampler_params['group_by_length'] = args.group_by_length
                     batch_sampler_params['lengths'] = train_dataset['lengths']
-                modality_lengths = self._get_modality_lengths(train_dataset)
-                if modality_lengths is not None:
-                    batch_sampler_params['group_by_modality'] = True
-                    batch_sampler_params['modality_lengths'] = modality_lengths
                 batch_sampler = BatchSamplerShard(
                     len(train_dataset), batch_size=self._train_batch_size, **batch_sampler_params)
                 dataloader_params['worker_init_fn'] = partial(

@@ -160,9 +160,9 @@ class DatasetLoader(BaseDatasetLoader):
                 dataset_syntax.dataset,
                 dataset_meta=dataset_meta,
             )
-            #logger.info(f"Dataset {dataset_syntax.dataset} is loaded, filtering by length...; number of rows: {len(dataset)}")
-            #dataset = filter_dataset_by_length(dataset, dataset_meta, max_length=8192, num_proc=self.num_proc)
-            #logger.info(f"Dataset {dataset_syntax.dataset} is filtered, number of rows: {len(dataset)}")
+            logger.info(f"Dataset {dataset_syntax.dataset} is loaded, filtering by length...; number of rows: {len(dataset)}")
+            dataset = filter_dataset_by_length(dataset, dataset_meta, max_length=8192, num_proc=self.num_proc)
+            logger.info(f"Dataset {dataset_syntax.dataset} is filtered, number of rows: {len(dataset)}")
         else:
             subsets: List[SubsetDataset] = self._select_subsets(dataset_syntax.subsets, dataset_meta)
             revision = dataset_meta.hf_revision if use_hf else dataset_meta.ms_revision

@@ -1239,7 +1239,6 @@ class DataLoaderMixin:
                 args.deepspeed['tensor_parallel']['autotp_size']
                 if args.deepspeed and 'tensor_parallel' in args.deepspeed else 1,
             }
-
             if hasattr(train_dataset, '__len__'):
                 if args.group_by_length:
                     batch_sampler_params['group_by_length'] = args.group_by_length

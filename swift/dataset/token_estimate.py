@@ -1,10 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 """Token estimation for multimodal rows (text + images) to filter by max_length."""
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
-
-# TowerVision (utter-project/TowerVision-2B) uses LlavaNextProcessor
-TOWERVISION_MODEL_ID = 'utter-project/TowerVision-2B'
-
+from swift.template import MaxLengthError
 if TYPE_CHECKING:
     from swift.template import Template
 
@@ -28,21 +25,6 @@ def _get_image_size(path_or_bytes: Any) -> Optional[Tuple[int, int]]:
         return (h, w)  # return (height, width) for processor
     except Exception:
         return None
-
-
-def _estimate_text_tokens(row: Dict[str, Any], tokenizer: Any) -> int:
-    """Estimate text tokens from messages (no images)."""
-    text_parts = []
-    for msg in row.get('messages', []): 
-        c = msg.get('content', '')
-        if isinstance(c, str):
-            text_parts.append(c)
-        elif isinstance(c, list):
-            for it in c:
-                if isinstance(it, dict) and it.get('type') == 'text':
-                    text_parts.append(it.get('text', ''))
-    text = ' '.join(text_parts) or ''
-    return len(tokenizer.encode(text, add_special_tokens=True))
 
 
 def _get_image_sizes_from_row(row: Dict[str, Any]) -> List[Tuple[int, int]]:
@@ -81,73 +63,27 @@ def _get_image_sizes_from_row(row: Dict[str, Any]) -> List[Tuple[int, int]]:
     return sizes
 
 
-def estimate_num_image_tokens_llava_next(
+def _estimate_image_tokens_llava_next(
     processor: Any,
     image_sizes: List[Tuple[int, int]],
 ) -> int:
     """
-    Estimate total image tokens for LlavaNext/SigLIP models from image dimensions.
-
-    Uses processor._get_num_multimodal_tokens when available (transformers LlavaNextProcessor).
-    Falls back to processor._get_number_of_features per image if needed.
-
-    Args:
-        processor: LlavaNextProcessor (or compatible) with image_processor, patch_size, etc.
-        image_sizes: List of (height, width) per image.
-
-    Returns:
-        Total number of image tokens.
+    Estimate image tokens using the same logic as LlavaHfTemplate._encode.
+    Uses processor._get_number_of_features with processed size from image_processor.
+    Applies vision_feature_select_strategy == 'default' subtract 1.
     """
-    if not image_sizes:
+    if not image_sizes or not hasattr(processor, '_get_number_of_features'):
         return 0
-    # Prefer _get_num_multimodal_tokens (batch API)
-    if hasattr(processor, '_get_num_multimodal_tokens'):
-        mm_data = processor._get_num_multimodal_tokens(image_sizes=image_sizes)
-        if hasattr(mm_data, 'num_image_tokens'):
-            return sum(mm_data.num_image_tokens)
-    # Fallback: _get_number_of_features per image (needs processed height/width)
-    if hasattr(processor, '_get_number_of_features'):
-        ip = getattr(processor, 'image_processor', None)
-        if ip is not None and hasattr(ip, 'size'):
-            size = getattr(ip, 'size', None) or {}
-            if isinstance(size, dict):
-                if 'shortest_edge' in size:
-                    se = size['shortest_edge']
-                    proc_h, proc_w = se, se
-                else:
-                    h = size.get('height', 384)
-                    w = size.get('width', 384)
-                    proc_h = proc_w = min(h, w)
-            else:
-                proc_h = proc_w = 384
-        else:
-            proc_h = proc_w = 384
-        total = 0
-        for orig_h, orig_w in image_sizes:
-            n = processor._get_number_of_features(orig_h, orig_w, proc_h, proc_w)
-            if getattr(processor, 'vision_feature_select_strategy', None) == 'default':
-                n -= 1
-            total += n
-        return total
-    return 0
-
-
-_towervision_processor_cache: Dict[str, Any] = {}
-
-
-def _get_towervision_processor(model_dir: Optional[str] = None) -> Optional[Any]:
-    """Load LlavaNextProcessor for TowerVision. Uses model_dir or default utter-project/TowerVision-2B.
-    Cached per model_dir to avoid repeated loads during dataset filtering."""
-    path = model_dir or TOWERVISION_MODEL_ID
-    if path not in _towervision_processor_cache:
-        try:
-            from transformers import LlavaNextProcessor
-            _towervision_processor_cache[path] = LlavaNextProcessor.from_pretrained(
-                path, trust_remote_code=True
-            )
-        except Exception:
-            _towervision_processor_cache[path] = None
-    return _towervision_processor_cache[path]
+    # Get processed size from image_processor (same as LlavaHfTemplate)
+    ip = getattr(processor, 'image_processor', None)
+    proc_h = proc_w = 384
+    total = 0
+    for orig_h, orig_w in image_sizes:
+        n = processor._get_number_of_features(orig_h, orig_w, 384, 384)
+        if getattr(processor, 'vision_feature_select_strategy', None) == 'default':
+            n -= 1
+        total += n
+    return total
 
 
 def ensure_vision_tokens_in_row(row: Dict[str, Any]) -> bool:
@@ -156,76 +92,82 @@ def ensure_vision_tokens_in_row(row: Dict[str, Any]) -> bool:
     """
     images = row.get('images', [])
     messages = row.get('messages', [])
-    # search the vision token <image>
-    # Count number of <image> tokens across all messages
     vision_token_count = 0
     for msg in messages:
         content = msg.get("content", "")
         if isinstance(content, str):
             vision_token_count += content.count("<image>")
-
-    #num_images = len(images)
     if len(images) > 1:
         return False
     if len(images) != vision_token_count:
         return False
     return True
 
+from typing import Any
+
+_processor_cache = {}
+
+def load_processor(model_dir: str) -> Any:
+    """
+    Loads a LlavaNextProcessor from transformers, caching by model_dir.
+    """
+    if model_dir in _processor_cache:
+        return _processor_cache[model_dir]
+    from transformers import LlavaNextProcessor
+    proc = LlavaNextProcessor.from_pretrained(model_dir, trust_remote_code=True)
+    _processor_cache[model_dir] = proc
+    return proc
+
 def estimate_tokens_for_mllm_row(
     row: Dict[str, Any],
-    template: 'Template',
-    max_length: int,
-    *,
-    use_lightweight: bool = True,
-    model_dir: Optional[str] = None,
-) -> bool:
+    processor: Any,
+) -> int:
     """
-    Estimate whether a multimodal row fits within max_length.
-
-    Returns True if the row should be kept (within limit), False to filter out.
+    Estimate total token count for a multimodal row.
 
     Args:
         row: Dataset row with 'messages' and optionally 'images'.
-        template: Initialized template (processor must be inited for full encode path).
-        max_length: Maximum allowed sequence length.
-        use_lightweight: If True, use fast image-token estimation for TowerVision when
-            possible; otherwise always use full template.encode (slower but accurate).
-        model_dir: Model path for TowerVision (e.g. utter-project/TowerVision-2B or
-            local path). Used only for lightweight path; processor is loaded directly.
+        processor: Processor.
 
     Returns:
-        True if row fits, False to filter out.
+        Total token count, or -1 if invalid/cannot estimate.
     """
-    from swift.template import MaxLengthError
-
     if 'messages' not in row:
-        return False
+        return -1
 
-    # TowerVision: img_tokens + text_tokens (processor loaded directly)
-    proc = _get_towervision_processor(model_dir)
-    if proc is not None and (
-        hasattr(proc, '_get_num_multimodal_tokens') or hasattr(proc, '_get_number_of_features')
-    ):
-        try:
-            image_sizes = _get_image_sizes_from_row(row)
-            img_tokens = 0
-            if len(image_sizes) > 0:
-                image_sizes = image_sizes[0]
-                # count 1 only, if > 1 it will be filtered out in later steps
-                img_tokens = proc._get_number_of_features(image_sizes[0], image_sizes[1], 384, 384)
-                if img_tokens < 300:
-                    return False # filter out the sample with tiny image
-        except Exception as e:
-            logger.error(f'Error estimating image tokens: {e}')
-            return False # filter out the sample with error
-        return True
-    #     tokenizer = getattr(template, 'tokenizer', None) or getattr(proc, 'tokenizer', None)
-    #     text_tokens = _estimate_text_tokens(row, tokenizer) if tokenizer else 0
-    #     # Add buffer for template overhead (prefix, suffix, chat format)
-    #     #safe_buffer = 328
-    #     #total = img_tokens + text_tokens + safe_buffer
+    # if not use_lightweight:
+    #     # Accurate path: use the same template.encode as training
+    #     try:
+    #         encoded = template.encode(row, return_length=True)
+    #         lengths = encoded.get('lengths', [len(encoded.get('input_ids', []))])
+    #         total = max(lengths) if isinstance(lengths, list) else lengths
+    #         return int(total)
+    #     except Exception as e:
+    #         return -1
+
+    # Lightweight path: use template.processor (same as template uses during encode)
+    # proc = load_processor("/e/scratch/jureap126/gviveiros/hf_models/TowerVision-2B")
+    
+    if row.get('images') is not None:
+        image_sizes = _get_image_sizes_from_row(row)
+        img_tokens = _estimate_image_tokens_llava_next(processor, image_sizes)
     else:
-        raise ValueError('TowerVision processor is not loaded or is not compatible with the template.')
-    #if total > max_length:
-    #print(f"Total tokens: {total} > max_length: {max_length}")
-    #return total <= max_length
+        img_tokens = 0
+
+    
+
+    text_parts = []
+    for msg in row.get('messages', []):
+        c = msg.get('content', '')
+        if isinstance(c, str):
+            text_parts.append(c)
+        elif isinstance(c, list):
+            for it in c:
+                if isinstance(it, dict) and it.get('type') == 'text':
+                    text_parts.append(it.get('text', ''))
+    text = ' '.join(text_parts) or ''
+    text_tokens = len(processor.tokenizer.encode(text, add_special_tokens=False))
+
+    template_overhead = 128
+    total = img_tokens + text_tokens + template_overhead
+    return img_tokens, int(total)

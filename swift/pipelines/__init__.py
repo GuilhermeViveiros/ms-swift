@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from .base import SwiftPipeline
     from .eval import eval_main
     from .export import export_main, export_to_ollama, merge_lora, quantize_model
+    from .precompute import precompute_main
     from .infer import deploy_main, infer_main, rollout_main, run_deploy
     from .sampling import sampling_main
     from .train import SwiftSft, pretrain_main, rlhf_main, sft_main
@@ -22,6 +23,7 @@ else:
             'rollout_main',
         ],
         'export': ['export_main', 'merge_lora', 'quantize_model', 'export_to_ollama'],
+        'precompute': ['precompute_main'],
         'app': ['app_main'],
         'eval': ['eval_main'],
         'train': ['sft_main', 'pretrain_main', 'rlhf_main', 'SwiftSft'],

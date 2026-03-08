@@ -5,6 +5,7 @@ from .deploy_args import DeployArguments, RolloutArguments
 from .eval_args import EvalArguments
 from .export_args import ExportArguments
 from .infer_args import InferArguments
+from .precompute_args import PrecomputeArguments
 from .pretrain_args import PretrainArguments
 from .rlhf_args import RLHFArguments
 from .sampling_args import SamplingArguments

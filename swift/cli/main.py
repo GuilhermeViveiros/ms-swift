@@ -21,6 +21,7 @@ ROUTE_MAPPING: Dict[str, str] = {
     'rlhf': 'swift.cli.rlhf',
     'sample': 'swift.cli.sample',
     'export': 'swift.cli.export',
+    'precompute': 'swift.cli.precompute',
     'eval': 'swift.cli.eval',
     'app': 'swift.cli.app',
 }

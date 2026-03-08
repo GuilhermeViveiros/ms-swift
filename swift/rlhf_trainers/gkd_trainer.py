@@ -17,7 +17,7 @@ from trl import SFTTrainer as HFSFTTrainer
 from typing import Dict, Optional, Union
 from swift.utils.logger import rank0_print, rank_print
 from swift.template import TemplateInputs
-from swift.trainers import SwiftMixin, disable_gradient_checkpointing
+from swift.trainers import DataLoaderMixin, SwiftMixin, disable_gradient_checkpointing
 from swift.utils import (JsonlWriter, get_logger, is_swanlab_available, is_wandb_available, remove_response, to_device,
                          unwrap_model_for_generation)
 from .rollout_mixin import DataType, RolloutTrainerMixin
@@ -51,7 +51,7 @@ class DataSource(str, Enum):
     DATASET = 'dataset'  # Off-policy: use dataset responses
 
 
-class GKDTrainer(RolloutTrainerMixin, SwiftMixin, HFGKDTrainer):
+class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer):
 
     def __init__(self, model: Optional[Union[PreTrainedModel, nn.Module, str]] = None, *_args, **kwargs):
         teacher_model = kwargs.pop('teacher_model')

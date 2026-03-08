@@ -19,7 +19,7 @@ DATASET_TYPE = Union[HfDataset, HfIterableDataset]
 
 logger = get_logger()
 
-_pair_keys = ['messages', 'images', 'videos', 'audios', 'tools', 'objects']
+_pair_keys = ['messages', 'images', 'videos', 'audios', 'tools', 'objects', 'lengths']
 
 
 class RowPreprocessor:

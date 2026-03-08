@@ -6,7 +6,7 @@ from datasets import Dataset as HfDataset
 from datasets import load_dataset as hf_load_dataset
 from functools import partial
 from modelscope.hub.utils.utils import get_cache_dir
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from swift.hub import get_hub
 from swift.utils import get_logger, get_seed, safe_ddp_context, use_hf_hub
@@ -14,7 +14,7 @@ from .dataset_meta import DATASET_TYPE, BaseDatasetLoader
 from .dataset_syntax import DatasetSyntax
 from .preprocessor import RowPreprocessor
 from .register import DATASET_MAPPING, DatasetMeta, SubsetDataset
-from .utils import filter_dataset_by_length
+from .utils import filter_and_annotate_by_token_length, filter_small_images
 logger = get_logger()
 
 
@@ -30,6 +30,7 @@ class DatasetLoader(BaseDatasetLoader):
         download_mode: Literal['force_redownload', 'reuse_dataset_if_exists'] = 'reuse_dataset_if_exists',
         columns: Optional[Dict[str, str]] = None,
         remove_unused_columns: bool = True,
+        processor: Optional[Any] = None,
     ):
         self.num_proc = num_proc
         self.load_from_cache_file = load_from_cache_file
@@ -39,6 +40,7 @@ class DatasetLoader(BaseDatasetLoader):
         self.download_mode = download_mode
         self.columns = columns
         self.remove_unused_columns = remove_unused_columns
+        self.processor = processor
 
     def _load_dataset_path(
         self,
@@ -160,9 +162,6 @@ class DatasetLoader(BaseDatasetLoader):
                 dataset_syntax.dataset,
                 dataset_meta=dataset_meta,
             )
-            logger.info(f"Dataset {dataset_syntax.dataset} is loaded, filtering by length...; number of rows: {len(dataset)}")
-            dataset = filter_dataset_by_length(dataset, dataset_meta, max_length=8192, num_proc=self.num_proc)
-            logger.info(f"Dataset {dataset_syntax.dataset} is filtered, number of rows: {len(dataset)}")
         else:
             subsets: List[SubsetDataset] = self._select_subsets(dataset_syntax.subsets, dataset_meta)
             revision = dataset_meta.hf_revision if use_hf else dataset_meta.ms_revision
@@ -174,10 +173,6 @@ class DatasetLoader(BaseDatasetLoader):
                     use_hf=use_hf,
                     revision=revision,
                 )
-                # filter dataset by length
-                logger.info(f"Dataset {dataset_syntax.dataset} is loaded, filtering by length...; number of rows: {len(dataset)}")
-                dataset = filter_dataset_by_length(dataset, dataset_meta, max_length=dataset_meta.max_length, num_proc=self.num_proc*5)
-                logger.info(f"Dataset {dataset_syntax.dataset} is filtered, number of rows: {len(dataset)}")
                 datasets.append(dataset)
             dataset = self.concat_datasets(datasets)
         return dataset
@@ -231,6 +226,8 @@ def load_dataset(
     # self-cognition
     model_name: Optional[Union[Tuple[str, str], List[str]]] = None,  # zh, en
     model_author: Optional[Union[Tuple[str, str], List[str]]] = None,
+    # length filtering (multimodal): pass Template for accurate token estimation
+    template: Optional[Any] = None,
 ) -> Tuple[DATASET_TYPE, Optional[DATASET_TYPE]]:
     """Load and preprocess datasets.
 
@@ -304,6 +301,7 @@ def load_dataset(
         num_proc = None
     train_datasets = []
     val_datasets = []
+
     loader = DatasetLoader(
         num_proc=num_proc,
         load_from_cache_file=load_from_cache_file,
@@ -313,9 +311,8 @@ def load_dataset(
         download_mode=download_mode,
         columns=columns,  # columns_mapping
         remove_unused_columns=remove_unused_columns,
+        processor=template.processor,
     )
-
-    
 
 
     use_hf_default = use_hf

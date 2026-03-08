@@ -6,7 +6,7 @@ import tempfile
 from datasets import Dataset as HfDataset
 from modelscope.hub.utils.utils import get_cache_dir
 from torch.utils.data import Dataset
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 
 from swift.template import Template
 from swift.utils import get_logger
@@ -18,42 +18,146 @@ from .token_estimate import (
 
 logger = get_logger()
 
+def _get_image_size(path_or_bytes: Any) -> Optional[Tuple[int, int]]:
+    """Get (height, width) from image path, bytes, or dict with path/bytes. Returns None on failure."""
+    try:
+        from PIL import Image
+        from swift.template.vision_utils import load_file
 
-def filter_dataset_by_length(
+        if isinstance(path_or_bytes, dict):
+            path_or_bytes = path_or_bytes.get('bytes') or path_or_bytes.get('path')
+        if path_or_bytes is None:
+            return None
+        f = load_file(path_or_bytes)
+        if hasattr(f, 'read'):
+            img = Image.open(f)
+        else:
+            img = Image.open(path_or_bytes)
+        w, h = img.size  # PIL returns (width, height)
+        return (h, w)  # return (height, width) for processor
+    except Exception:
+        return None
+
+
+def _get_image_sizes_from_row(row: Dict[str, Any]) -> List[Tuple[int, int]]:
+    """Extract image paths from row and return list of (height, width) per image."""
+    sizes = []
+    images = row.get('images') or []
+    if isinstance(images, str):
+        images = [images]
+    for img in images:
+        path = img.get('path') if isinstance(img, dict) else img
+        if path is None and isinstance(img, dict) and img.get('bytes'):
+            path = img
+        if path is not None:
+            sz = _get_image_size(path)
+            if sz:
+                sizes.append(sz)
+    # Also from messages content (e.g. {"type": "image", "image": {"url": "..."}})
+    for msg in row.get('messages', []):
+        content = msg.get('content')
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            key = item.get('type', '')
+            if key.endswith('_url'):
+                key = key[:-4]
+            if key in ('image', 'audio', 'video'):
+                val = item.get(key) or item.get(f'{key}_url')
+                if isinstance(val, dict):
+                    val = val.get('url')
+                if val:
+                    sz = _get_image_size(val) if key == 'image' else None
+                    if sz:
+                        sizes.append(sz)
+    return sizes
+
+def filter_small_images(
     dataset: HfDataset,
-    template: Template,
+    processor: Any,
     max_length: int,
     *,
     num_proc: int = 1,
-    desc: str = 'filter_by_length',
-    model_dir: Optional[str] = None,
+    desc: str = 'filter_small_images',
 ) -> HfDataset:
     """
-    Filter dataset rows that exceed max_length (estimated via template.encode).
+    Filter rows with small images.
+    Load image with PIl and check size
+    If size is less than 50x50, filter out
+    Also if channel last filter out
+    """
+    def _filter_small_images(row: Dict[str, Any]) -> bool:
+        """Filter rows with small images."""
+        if not ensure_vision_tokens_in_row(row):
+            return False
+       
+        image_sizes = _get_image_sizes_from_row(row)
+        if not image_sizes:
+            return True
+        h, w = image_sizes[0][0], image_sizes[0][1]  # _get_image_size returns (height, width)
+        if h * w < 50 * 50:
+            return False
+        return True
+        
+    return dataset.filter(_filter_small_images, num_proc=num_proc*4, desc=desc)
 
-    Useful for GKD/multimodal training to avoid collective shape mismatches from
-    oversized sequences.
+def filter_and_annotate_by_token_length(
+    dataset: HfDataset,
+    processor: Any,
+    max_length: int,
+    *,
+    num_proc: int = 1,
+    desc: str = 'map_and_filter_by_lengths',
+    use_lightweight: bool = True,
+) -> HfDataset:
+    """
+    Map (add lengths) and filter dataset rows that exceed max_length.
+    Keeps rows where ensure_vision_tokens_in_row is True and total tokens <= max_length.
+    Adds 'lengths' column to accepted samples for group_by_length.
 
     Args:
         dataset: HuggingFace Dataset.
-        template: Initialized template (processor inited).
+        processor: Processor.
         max_length: Maximum sequence length.
-        num_proc: Number of processes for dataset.map.
+        num_proc: Number of processes for dataset.map/filter.
         desc: Progress bar description.
-        model_dir: Model path for TowerVision (e.g. utter-project/TowerVision-2B).
-            Used for lightweight image-token estimation when filtering.
+        use_lightweight: If True, use fast processor-based estimation. If False,
+            use template.encode() for exact token count (slower, matches training).
 
     Returns:
-        Filtered dataset.
+        Filtered dataset with 'lengths' column on accepted samples.
     """
-    from typing import List
-    def _keep_batch(batch: Dict[str, List[Any]]) -> List[bool]:
-        """Process a batch of rows; return list of bools."""
+    def _map_add_lengths(batch: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
+        """Add lengths to each row; use -1 for rejected rows."""
         n = len(batch['messages']) if 'messages' in batch else len(next(iter(batch.values())))
         rows = [{k: batch[k][i] for k in batch} for i in range(n)]
-        return [ensure_vision_tokens_in_row(r) and estimate_tokens_for_mllm_row(r, template, max_length, model_dir=model_dir) for r in rows]
+        lengths = []
+        for r in rows:
+            if not ensure_vision_tokens_in_row(r):
+                lengths.append(-1)
+            else:
+                v_tokens, total = estimate_tokens_for_mllm_row(r, processor=processor)
+                if v_tokens > 0 and v_tokens < 100:
+                    # ignore this row
+                    lengths.append(-1)
+                lengths.append(total if 0 <= total <= max_length else -1)
+        return {**batch, 'lengths': lengths}
 
-    return dataset.filter(lambda row: _keep_batch(row), batched=True, batch_size=456, num_proc=num_proc*10, desc=desc)
+    def _keep_batch(batch: Dict[str, List[Any]]) -> List[bool]:
+        """Keep rows where lengths >= 0 (accepted)."""
+        return [l >= 0 for l in batch['lengths']]
+    
+    dataset = dataset.map(
+        _map_add_lengths,
+        batched=True,
+        batch_size=256,
+        num_proc=num_proc*6,
+        desc=f'{desc}_map',
+    )
+    return dataset.filter(_keep_batch, batched=True, batch_size=256, num_proc=num_proc*6, desc=desc)
+
 
 
 def sample_dataset(

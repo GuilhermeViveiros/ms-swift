@@ -4,7 +4,7 @@
 #SBATCH --error=logs/%x/%x_%j.err
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=70
-#SBATCH --nodes=24
+#SBATCH --nodes=28
 #SBATCH --gres=gpu:4
 #SBATCH --exclusive
 #SBATCH --partition=booster
@@ -49,7 +49,7 @@ export TORCH_WORKER_TIMEOUT=120
 # ===============================
 # Local Environment Variables
 # ===============================
-OUTPUT_DIR=/e/scratch/jureap126/gviveiros/tvision/
+OUTPUT_DIR=/e/project1/jureap126/gviveiros/tvision/
 mkdir -p $OUTPUT_DIR/logs/gkd_tvision_full
 source /e/home/jusers/viveiros1/jupiter/envs/swift/bin/activate
 # Variables of GKD Trainer
@@ -58,8 +58,9 @@ lmbda=0.5 # On-Policy learning probability
 
 PER_DEVICE_TRAIN_BATCH_SIZE=2
 GRADIENT_ACCUMULATION_STEPS=1
+TEACHER="TowerVision-9B"
 GLOBAL_BATCH_SIZE=$((PER_DEVICE_TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * NPROC_PER_NODE * NNODES))
-RUN_NAME=gkd_tvision_full_${NNODES}_beta_${beta}_lmbda_${lmbda}
+RUN_NAME=distill_tvision_${NNODES}_beta_${beta}_lmbda_${lmbda}_${TEACHER}
 if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
     export CUDA_VISIBLE_DEVICES=0,1,2,3
 fi
@@ -98,6 +99,7 @@ datasets=(
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/filtered_data/tally_qa.jsonl'
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/filtered_data/VisionBlocks-pixmo-ask-model-anything.jsonl'
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/filtered_data/VisionBlocks-pixmo-cap-qa.jsonl'
+    #'/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/filtered_data/VisionBlocks-pixmo-cap.jsonl',
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/filtered_data/pixmo-count.jsonl'
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/filtered_data/pixmo-docs.jsonl'
     '/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/filtered_data/vqav2.jsonl'
@@ -137,6 +139,15 @@ datasets=(
 # ===============================
 # Swift Command
 # ===============================
+# --model /e/scratch/jureap126/gviveiros/hf_models/TowerVision-2B \
+
+# --use_vllm true \
+#     --vllm_mode colocate \
+#     --vllm_engine_kwargs '{"hf_overrides":{"architectures":["LlavaNextForConditionalGeneration"],"text_config":{"architectures":["Gemma2ForCausalLM"]}}}' \
+#     --vllm_gpu_memory_utilization 0.20 \
+#     --lmbda 0.5 \
+#     --beta 0.5 \
+
 SWIFT_CMD="ROOT_IMAGE_DIR=/e/scratch/jureap126/gviveiros/tvision/vision-data/llava_datasets/images \
 HF_DATASETS_OFFLINE=1 \
 TRANSFORMERS_OFFLINE=1 \
@@ -145,8 +156,9 @@ MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT} \
 NNODES=${NNODES} NPROC_PER_NODE=${NPROC_PER_NODE} \
 swift rlhf \
     --rlhf_type gkd \
-    --model /e/scratch/jureap126/gviveiros/hf_models/TowerVision-2B \
+    --model /e/scratch/jureap126/gviveiros/tvision/vlm_ckpts/pretrain/towerVision2B_PE \
     --teacher_model /e/scratch/jureap126/gviveiros/hf_models/TowerVision-9B \
+    --model_type llava_next_gemma2_hf \
     --dataset ${datasets[@]} \
     --load_from_cache_file true \
     --split_dataset_ratio 0 \
@@ -154,7 +166,6 @@ swift rlhf \
     --freeze_vit false \
     --freeze_aligner false \
     --freeze_llm false \
-    --vit_lr 2e-6 \
     --seq_kd false \
     --use_vllm true \
     --vllm_mode colocate \
@@ -168,29 +179,32 @@ swift rlhf \
     --num_train_epochs 1 \
     --per_device_train_batch_size ${PER_DEVICE_TRAIN_BATCH_SIZE} \
     --per_device_eval_batch_size 1 \
+    --vit_lr 2e-6 \
     --learning_rate 1e-5 \
     --gradient_accumulation_steps ${GRADIENT_ACCUMULATION_STEPS} \
     --eval_steps 0 \
     --eval_strategy no \
-    --save_steps 0.15 \
+    --save_steps 0.1 \
     --save_total_limit 5 \
     --use_logits_to_keep true \
     --gradient_checkpointing true \
     --logging_steps 5 \
     --save_on_each_node false \
     --max_completion_length 324 \
-    --output_dir /e/scratch/jureap126/gviveiros/tvision/output/${RUN_NAME} \
+    --output_dir /e/project1/jureap126/gviveiros/tvision/output/${RUN_NAME} \
     --warmup_ratio 0.05 \
     --dataloader_num_workers 1 \
     --dataset_num_proc 2 \
     --save_only_model false \
     --max_length 5000 \
     --deepspeed zero2 \
+    --resume_from_checkpoint /e/project1/jureap126/gviveiros/tvision/output/gkd_tvision_full_28_beta_0.5_lmbda_0.5_TowerVision-9B/v1-20260316-112802/checkpoint-10988 \
     --offload_teacher_model true \
     --teacher_deepspeed zero2 \
-    --resume_from_checkpoint /e/scratch/jureap126/gviveiros/tvision/output/gkd_tvision_full_24_beta_0.5_lmbda_0.5_teacher_2b/v1-20260314-185611/checkpoint-17200 \
     --group_by_length true"
 
+# --resume_from_checkpoint /e/project1/jureap126/gviveiros/tvision/output/gkd_tvision_full_28_beta_0.5_lmbda_0.5_TowerVision-9B/v0-20260316-020701/checkpoint-5494 \
+# --resume_from_checkpoint /e/scratch/jureap126/gviveiros/tvision/output/gkd_tvision_full_24_beta_0.5_lmbda_0.5_teacher_2b/v1-20260314-185611/checkpoint-17200 \
 # --resume_from_checkpoint /e/scratch/jureap126/gviveiros/tvision/output/gkd_tvision_full_24_beta_0.5_lmbda_0.5_teacher_2b/v1-20260314-185611/checkpoint-17200 \
 # --resume_from_checkpoint /e/scratch/jureap126/gviveiros/tvision/output/gkd_tvision_full_24_beta_0.5_lmbda_0.5/v24-20260311-163423/checkpoint-430/ \
 # --teacher_deepspeed zero3 \

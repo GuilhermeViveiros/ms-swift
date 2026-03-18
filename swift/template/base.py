@@ -521,6 +521,7 @@ class Template(ProcessorMixin):
             inputs = deepcopy(inputs)
         assert isinstance(inputs, TemplateInputs)
         chosen = inputs.chosen
+
         if self.task_type == 'causal_lm':
             if self.mode in {'train', 'transformers', 'vllm', 'lmdeploy', 'sglang'}:
                 encoded = self._encode_truncated(chosen)
@@ -1339,6 +1340,7 @@ class Template(ProcessorMixin):
             template_backend = 'jinja'
             logger.info_once(f'Setting template_backend: {template_backend}')
         self._swift_prepare_inputs(inputs)
+
         res_context_list, loss_scale_list, answer_len = (
             self._swift_encode(inputs) if template_backend == 'swift' else self._jinja_encode(inputs))
         encoded = {}

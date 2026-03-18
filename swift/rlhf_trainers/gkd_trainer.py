@@ -12,12 +12,13 @@ from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from enum import Enum
 from packaging import version
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, TrainerCallback, TrainerControl, TrainerState, TrainingArguments
 from trl import SFTTrainer as HFSFTTrainer
 from typing import Dict, Optional, Union
 from swift.utils.logger import rank0_print, rank_print
 from swift.template import TemplateInputs
 from swift.trainers import DataLoaderMixin, SwiftMixin, disable_gradient_checkpointing
+from swift.loss_scale import get_loss_scale
 from swift.utils import (JsonlWriter, get_logger, is_swanlab_available, is_wandb_available, remove_response, to_device,
                          unwrap_model_for_generation)
 from .rollout_mixin import DataType, RolloutTrainerMixin
@@ -43,6 +44,38 @@ if is_wandb_available():
     import wandb
 if is_swanlab_available():
     import swanlab
+
+
+class ZeroLossEarlyStoppingCallback(TrainerCallback):
+    """Stop training if loss stays exactly 0.0 (or below a threshold) for `patience` consecutive logging steps.
+
+    This catches the silent collapse that occurs when on-policy student generations produce
+    all-masked labels (num_valid==0), causing generalized_jsd_loss to return zeros and
+    freezing the model parameters indefinitely.
+    """
+
+    def __init__(self, patience: int = 5, loss_threshold: float = 1e-8):
+        self.patience = patience
+        self.loss_threshold = loss_threshold
+        self._zero_loss_count = 0
+
+    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs=None, **kwargs):
+        if logs is None:
+            return
+        loss = logs.get('loss')
+        if loss is None:
+            return
+        if loss <= self.loss_threshold:
+            self._zero_loss_count += 1
+            if self._zero_loss_count >= self.patience:
+                logger.warning(
+                    f'[ZeroLossEarlyStopping] Loss has been <= {self.loss_threshold} for '
+                    f'{self._zero_loss_count} consecutive logging steps (step {state.global_step}). '
+                    f'This likely indicates on-policy generation collapse (all labels masked). '
+                    f'Stopping training.')
+                control.should_training_stop = True
+        else:
+            self._zero_loss_count = 0
 
 
 class DataSource(str, Enum):
@@ -92,6 +125,10 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
         self.teacher_model.eval()
         if self.args.offload_teacher_model:
             self.offload_model(self.accelerator.unwrap_model(self.teacher_model))
+
+        # Register early stopping callback to catch loss collapse (num_valid=0 → loss=0.0)
+        zero_loss_patience = getattr(args, 'zero_loss_patience', 5)
+        self.add_callback(ZeroLossEarlyStoppingCallback(patience=zero_loss_patience))
 
         # Initialize rollout infrastructure for vLLM support
         self.prepare_rollout()
@@ -272,18 +309,27 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
         else:
             return loss
 
-    def _prepare_batch_inputs(self, inputs: list, encode_prompt_only: bool = False) -> Dict[str, torch.Tensor]:
+    def _prepare_batch_inputs(self, inputs: list, encode_prompt_only: bool = False,
+                              loss_scale_override: Optional[str] = None) -> Dict[str, torch.Tensor]:
         """Prepare batch inputs for training.
 
         Args:
             inputs: List of input data dictionaries
             encode_prompt_only: If True, only encode the prompt part (for on-policy/seq_kd generation).
                                If False, encode the full messages including response (for offline dataset).
+            loss_scale_override: If set, temporarily override template.loss_scale for this encoding.
+                - On-policy: keep None (inherits 'last_round' default — only the generated turn is labeled)
+                - Off-policy: pass 'default' (all assistant turns in multi-turn conversations are labeled)
         """
         from .utils import replace_assistant_response_with_ids
 
         template = self.template
         batch_encoded_inputs = []
+
+        # Temporarily override loss_scale if requested
+        original_loss_scale = template.loss_scale
+        if loss_scale_override is not None:
+            template.loss_scale = get_loss_scale(loss_scale_override)
 
         # Use 'transformers' mode for prompt-only encoding, 'train' mode for full encoding
         mode = 'transformers' if encode_prompt_only else 'train'
@@ -304,6 +350,9 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
 
             batch_encoded = to_device(template.data_collator(batch_encoded_inputs, padding_to=padding_to), self.model.device)
 
+        if loss_scale_override is not None:
+            template.loss_scale = original_loss_scale
+
         return batch_encoded
 
     # Code borrowed from huggingface/trl
@@ -322,8 +371,10 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
         When use_vllm is enabled, vLLM engine is used for faster generation.
         """
         args = self.args
+        
+        effective_lmbda = self._get_effective_lmbda()
         with profiling_context(self, 'get_completions'):
-            if self._get_random_num() <= self.lmbda:
+            if self._get_random_num() <= effective_lmbda:
                 # On-policy: student model generates responses
                 data_source = DataSource.STUDENT
                 # Resample inputs that fail encoding when truncation_strategy is 'raise'('delete')
@@ -337,12 +388,32 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
                         completions = [deepcopy(inp['messages'][-1]['content']) for inp in generated_inputs]
                         valid_messages = gather_object(messages)
                         valid_completions = gather_object(completions)
+                        dataset_names = gather_object([inp.get('dataset_name', 'unknown') for inp in generated_inputs])
                         self._logs['prompt'].extend(self._apply_chat_template_to_messages_list(valid_messages))
                         self._logs['completion'].extend(valid_completions)
+                        self._logs['dataset_name'].extend(dataset_names)
+                        # Approximate token length from gathered completion strings (chars / 4)
+                        lengths = [len(c) // 4 if isinstance(c, str) else 0 for c in valid_completions]
+                        self._logs['completion_len'].extend(lengths)
+                        if lengths:
+                            self._metrics['train']['completion_len/mean'].append(
+                                sum(lengths) / len(lengths))
+                            self._metrics['train']['completion_len/min'].append(min(lengths))
+                            self._metrics['train']['completion_len/max'].append(max(lengths))
                     with self._template_context(self.template):
                         # vLLM already generated response, encode full messages
+                        # print("On Policy Inputs")
                         encoded_inputs = self._prepare_batch_inputs(generated_inputs, encode_prompt_only=False)
+                        # p1 =  encoded_inputs["labels"][0]
+                        # print(self.tokenizer.decode(p1[p1>0]))
+                        # p2 =  encoded_inputs["input_ids"][0]
+                        # print(self.tokenizer.decode(p2[p2>0]))
+                        # import pdb; pdb.set_trace()
+
+
+
                 else:
+                    raise Exception("Not supported at this moment")
                     # Need prompt-only encoding for on-policy generation
                     encoded_inputs = self._prepare_batch_inputs(inputs, encode_prompt_only=True)
                     with unwrap_model_for_generation(
@@ -356,6 +427,16 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
                     encoded_inputs['input_ids'] = new_input_ids
                     encoded_inputs['attention_mask'] = new_attention_mask
                     encoded_inputs['labels'] = new_labels
+                    if self.log_completions:
+                        # Count valid (non-masked) completion tokens per sample
+                        lengths = (new_labels != -100).sum(dim=1).tolist()
+                        all_lengths = gather_object(lengths)
+                        self._logs['completion_len'].extend(all_lengths)
+                        if all_lengths:
+                            self._metrics['train']['completion_len/mean'].append(
+                                sum(all_lengths) / len(all_lengths))
+                            self._metrics['train']['completion_len/min'].append(min(all_lengths))
+                            self._metrics['train']['completion_len/max'].append(max(all_lengths))
 
             elif self.seq_kd:
                 # Sequential KD: teacher model generates responses
@@ -384,7 +465,16 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
                 data_source = DataSource.DATASET
                 total_length = self.template.max_length + self.max_completion_length
                 with self._template_context(self.template, max_length=total_length):
-                    encoded_inputs = self._prepare_batch_inputs(inputs, encode_prompt_only=False)
+                    encoded_inputs = self._prepare_batch_inputs(inputs, encode_prompt_only=False,
+                                                               loss_scale_override='default')
+
+                # p1 =  encoded_inputs["labels"][0]
+                # print(self.tokenizer.decode(p1[p1>0]))
+                # p2 =  encoded_inputs["input_ids"][0]
+                # print(self.tokenizer.decode(p2[p2>0]))
+
+                # import pdb; pdb.set_trace()
+
 
             # Mark data source for downstream processing (e.g., conditional SFT loss)
             encoded_inputs['_data_source'] = data_source
@@ -422,6 +512,25 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
                 self.load_model(self.accelerator.unwrap_model(self.model))
             if getattr(self, 'optimizer', None) and self.args.offload_optimizer:
                 self.load_optimizer()
+
+    def _get_effective_lmbda(self) -> float:
+        """Return the current effective lmbda after applying linear warmup.
+
+        During warmup (global_step < warmup_steps), lmbda is linearly scaled from 0 to
+        self.lmbda. This prevents early on-policy generations from polluting training when
+        the student model has no instruction-following capability yet (e.g. after PE-only
+        alignment, before any SFT).
+        """
+        warmup_ratio = getattr(self.args, 'lmbda_warmup_ratio', 0.0)
+        if warmup_ratio <= 0.0:
+            return self.lmbda
+        max_steps = self.state.max_steps
+        if max_steps <= 0:
+            return self.lmbda
+        warmup_steps = int(warmup_ratio * max_steps)
+        if warmup_steps <= 0 or self.state.global_step >= warmup_steps:
+            return self.lmbda
+        return self.lmbda * (self.state.global_step / warmup_steps)
 
     def _get_random_num(self) -> float:
         """
@@ -544,6 +653,7 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
         """Initialize logging components for on-policy rollout tracking."""
         args = self.args
         self.log_completions = args.log_completions
+        self.completions_logging_steps = getattr(args, 'completions_logging_steps', 50)
         self.wandb_log_unique_prompts = getattr(args, 'wandb_log_unique_prompts', False)
         self.jsonl_writer = JsonlWriter(os.path.join(self.args.output_dir, 'completions.jsonl'))
 
@@ -551,6 +661,8 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
         self._logs = {
             'prompt': deque(),
             'completion': deque(),
+            'completion_len': deque(),  # token lengths of on-policy completions
+            'dataset_name': deque(),
         }
 
     def _apply_chat_template_to_messages_list(self, messages_list: DataType):
@@ -565,6 +677,9 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
 
     def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         """Override log method to include completion table logging (aligned with GRPO)."""
+        # Inject lmbda directly — it's deterministic so no need to accumulate via _metrics
+        if self.model.training:
+            logs['lmbda'] = self._get_effective_lmbda()
         # Call parent log method
         import transformers
         from packaging import version
@@ -574,12 +689,16 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
             super().log(logs)
 
         # Log completions table if we have data (only for on-policy generations)
-        if self.accelerator.is_main_process and self.log_completions and len(self._logs['prompt']) > 0:
+        if (self.accelerator.is_main_process and self.log_completions and len(self._logs['prompt']) > 0
+                and self.state.global_step % self.completions_logging_steps == 0):
             seen_nums = len(self._logs['prompt'])
+            completion_lens = list(self._logs['completion_len'])[:seen_nums]
             table = {
                 'step': [str(self.state.global_step)] * seen_nums,
+                'dataset_name': list(self._logs['dataset_name'])[:seen_nums],
                 'prompt': list(self._logs['prompt'])[:seen_nums],
                 'completion': list(self._logs['completion'])[:seen_nums],
+                'completion_len': completion_lens,
             }
 
             # Write to jsonl
@@ -587,12 +706,13 @@ class GKDTrainer(RolloutTrainerMixin, SwiftMixin, DataLoaderMixin, HFGKDTrainer)
 
             self._logs['prompt'].clear()
             self._logs['completion'].clear()
+            self._logs['completion_len'].clear()
+            self._logs['dataset_name'].clear()
             # Log to wandb if enabled
             report_to_wandb = self.args.report_to and 'wandb' in self.args.report_to and wandb.run is not None
             if report_to_wandb:
-                wandb_table = table.copy()
                 import pandas as pd
-                df = pd.DataFrame(wandb_table)
+                df = pd.DataFrame(table)
                 if self.wandb_log_unique_prompts:
                     df = df.drop_duplicates(subset=['prompt'])
                 wandb.log({'completions': wandb.Table(dataframe=df)})

@@ -340,9 +340,16 @@ def load_dataset(
             shuffle=shuffle,
             random_state=seed,
         )
+        # Inject dataset_name after subsampling so the map runs on the small subset, not the full dataset
+        if dataset_syntax.dataset_type == 'path':
+            _dataset_name = os.path.splitext(os.path.basename(dataset_syntax.dataset))[0]
+        else:
+            _dataset_name = dataset_syntax.dataset.rsplit('/', 1)[-1]
         if train_dataset is not None:
+            train_dataset = train_dataset.map(lambda _: {'dataset_name': _dataset_name})
             train_datasets.append(train_dataset)
         if val_dataset is not None:
+            val_dataset = val_dataset.map(lambda _: {'dataset_name': _dataset_name})
             val_datasets.append(val_dataset)
 
     if interleave_prob is None:

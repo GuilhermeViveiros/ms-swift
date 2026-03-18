@@ -195,6 +195,10 @@ class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardMo
         sft_alpha (float): The weight for the SFT loss component in GKD. The final loss is calculated as
             gkd_loss + sft_alpha * sft_loss`. Defaults to 0.
         lmbda (float): The lambda parameter for GKD, balancing policy and value losses. Defaults to 0.5.
+        lmbda_warmup_ratio (float): Fraction of total training steps over which lmbda is linearly warmed up
+            from 0 to its target value. Useful when the student has no instruction-tuning capability at the
+            start (e.g. after projector-only alignment), so early on-policy generations are incoherent.
+            Set to 0 to disable warmup. Defaults to 0.0.
         seq_kd (bool): Whether to use sequence-level knowledge distillation for GKD. Defaults to False.
         offload_teacher_model (bool): Whether to offload the teacher model to CPU memory to save VRAM during GKD
             training. Defaults to False.
@@ -232,6 +236,7 @@ class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardMo
     # GKD
     sft_alpha: float = 0
     lmbda: float = 0.5
+    lmbda_warmup_ratio: float = 0.0
     seq_kd: bool = False
     offload_teacher_model: bool = False
     # compat

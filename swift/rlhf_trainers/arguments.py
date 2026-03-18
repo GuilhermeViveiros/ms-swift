@@ -71,6 +71,9 @@ class GKDConfig(RolloutTrainerArgumentsMixin, TrainArgumentsMixin, HfGKDConfig):
     offload_teacher_model: bool = False
     max_completion_length: int = 512
     log_completions: bool = False
+    completions_logging_steps: int = 50
+    lmbda_warmup_ratio: float = 0.0
+    zero_loss_patience: int = 5
 
     def __post_init__(self):
         RolloutTrainerArgumentsMixin.__post_init__(self)
